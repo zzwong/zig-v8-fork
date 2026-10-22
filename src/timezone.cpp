@@ -75,4 +75,3 @@ extern "C" TimeZoneStatus v8__V8__SetDefaultTimeZone(
   ucal_setDefaultTimeZone(terminated.get(), &error);
   return status(error);
 }
-
