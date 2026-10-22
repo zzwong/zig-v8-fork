@@ -11,6 +11,8 @@ const LazyPath = std.Build.LazyPath;
 const StagedFile = struct { src: []const u8, dest: []const u8 };
 const staged_files = [_]StagedFile{
     .{ .src = "src/binding.cpp", .dest = "binding.cpp" },
+    .{ .src = "src/timezone.h", .dest = "timezone.h" },
+    .{ .src = "src/timezone.cpp", .dest = "timezone.cpp" },
     .{ .src = "src/inspector.h", .dest = "inspector.h" },
     .{ .src = "build-tools/BUILD.gn", .dest = "zig/BUILD.gn" },
     .{ .src = "build-tools/.gn", .dest = "zig/.gn" },
@@ -105,16 +107,20 @@ pub fn build(b: *std.Build) !void {
         .v8_enable_sandbox = b.option(bool, "v8_enable_sandbox", "V8 lightable sandbox") orelse false,
     };
 
+    const inspector_subtype = b.option(bool, "inspector_subtype", "Export default valueSubtype and descriptionForValueSubtype") orelse true;
     var build_opts = b.addOptions();
+    build_opts.addOption(bool, "standalone_tests", false);
     build_opts.addOption(
         bool,
         "inspector_subtype",
-        b.option(bool, "inspector_subtype", "Export default valueSubtype and descriptionForValueSubtype") orelse true,
+        inspector_subtype,
     );
 
     const cache_root = b.option([]const u8, "cache_root", "Root directory for the V8 and depot_tools cache") orelse pathFromRoot(b, ".lp-cache");
 
     const prebuilt_v8_path = b.option(LazyPath, "prebuilt_v8_path", "Path to a prebuilt libc_v8.a or libc_v8.so; may be a generated file");
+    const timezone_overlay = b.option(bool, "timezone_overlay", "Compile native ICU timezone bindings against a matching prebuilt static V8") orelse false;
+    build_opts.addOption(bool, "timezone_bindings", prebuilt_v8_path == null or timezone_overlay);
 
     const v8_dir = b.fmt("{s}/v8-{s}", .{ cache_root, V8_VERSION });
     const depot_tools_dir = b.fmt("{s}/depot_tools-{s}", .{ cache_root, V8_VERSION });
@@ -128,6 +134,10 @@ pub fn build(b: *std.Build) !void {
             .generated => "(generated archive)",
         };
         const is_shared_lib = std.mem.endsWith(u8, name, ".so");
+        if (timezone_overlay and (is_shared_lib or shared_v8)) {
+            std.debug.print("timezone_overlay requires a static V8 archive; existing shared assets hide native V8/ICU symbols. Use a wrapper-containing rebuilt asset instead.\n", .{});
+            return error.TimezoneOverlayRequiresStaticV8;
+        }
         if (is_shared_lib and !std.mem.eql(u8, name, "libc_v8.so")) {
             std.debug.print("prebuilt_v8_path: a shared V8 must be named libc_v8.so (got {s})\n", .{name});
             return error.PrebuiltV8BadName;
@@ -215,6 +225,7 @@ pub fn build(b: *std.Build) !void {
     v8_module.addImport("default_exports", build_opts.createModule());
 
     linkBuiltV8(v8_module, built_v8);
+    if (timezone_overlay and prebuilt_v8_path != null) addTimezoneOverlay(b, v8_module);
 
     switch (target.result.os.tag) {
         .macos => {
@@ -239,9 +250,15 @@ pub fn build(b: *std.Build) !void {
             .root_module = test_module,
         });
         test_module.addImport("binding", binding_module);
-        test_module.addImport("default_exports", build_opts.createModule());
+        const test_opts = b.addOptions();
+        test_opts.addOption(bool, "standalone_tests", true);
+        test_opts.addOption(bool, "inspector_subtype", inspector_subtype);
+        test_opts.addOption(bool, "timezone_bindings", prebuilt_v8_path == null or timezone_overlay);
+        test_opts.step.dependOn(built_v8.step);
+        test_module.addImport("default_exports", test_opts.createModule());
 
         linkBuiltV8(test_module, built_v8);
+        if (timezone_overlay and prebuilt_v8_path != null) addTimezoneOverlay(b, test_module);
 
         switch (target.result.os.tag) {
             .macos => {
@@ -256,6 +273,15 @@ pub fn build(b: *std.Build) !void {
         const tests_step = b.step("test", "Run unit tests");
         tests_step.dependOn(&run_tests.step);
     }
+}
+
+fn addTimezoneOverlay(b: *std.Build, mod: *std.Build.Module) void {
+    const common = b.lazyDependency("icu_common_headers", .{}) orelse return;
+    const i18n = b.lazyDependency("icu_i18n_headers", .{}) orelse return;
+    mod.addIncludePath(b.path("src"));
+    mod.addIncludePath(common.path(""));
+    mod.addIncludePath(i18n.path(""));
+    mod.addCSourceFile(.{ .file = b.path("src/timezone.cpp"), .flags = &.{"-std=c++20"} });
 }
 
 fn linkBuiltV8(mod: *std.Build.Module, built_v8: BuiltV8) void {

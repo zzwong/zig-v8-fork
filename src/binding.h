@@ -230,6 +230,7 @@ bool v8__V8__InitializeICU();
 // LC_ALL it leaves the C library's locale alone. Call after InitializeICU and
 // before creating an isolate. False when the tag does not parse.
 bool v8__V8__SetDefaultLocale(const char* bcp47_tag);
+#include "timezone.h"
 int v8__V8__Dispose();
 void v8__V8__DisposePlatform();
 const char* v8__V8__GetVersion();
